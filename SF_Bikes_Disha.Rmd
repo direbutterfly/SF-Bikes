@@ -1,0 +1,315 @@
+---
+title: "SF Bikes"
+author: "Disha Gupta"
+date: "11/11/2018"
+output:
+  html_document: default
+  pdf_document: default
+---
+Load all the relevant libraries:
+
+Load all the required packages. Pacman ensures to download the packages that don't already exist.
+
+```{r message=FALSE, warning=FALSE}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(readr,dplyr,ggplot2,caret,ranger,stringr,data.table,leaflet)
+options(scipen=999)
+```
+
+Set the working directory and read all the files
+```{r sf-bay-area-bike-share,message=FALSE, warning=FALSE}
+setwd("~/Downloads/sf-bay-area-bike-share")
+station <- read_csv("station.csv")
+#status <- read_csv("status.csv") #coudn't make use of it
+trip <- read_csv("trip.csv")
+weather <- read_csv("weather.csv")
+```
+
+Let's do some exploratory analysis on the data
+Top 10 stations with most trip starts:
+```{r pressure,message=FALSE, warning=FALSE}
+#Stations with most starts
+Starts = trip %>% group_by(start_station_id) %>% summarise(Starts=n())
+Starts = merge(Starts,station,by.x="start_station_id",by.y="id")
+Starts = Starts %>% top_n(10,Starts)
+ggplot(Starts,aes(x=reorder(name,-Starts),y=Starts))+geom_bar(stat = "identity",fill="blue")+
+  xlab("Station Name")+ylab("Number of starts")+ggtitle("Top 10 Stations")+theme_grey(base_size = 12)+
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10))
+```
+
+Let's visualize the location of the Top 10 stations with most starts. Green is the most, red is the least within top 10.
+```{r,message=FALSE, warning=FALSE}
+pal <- colorNumeric(
+  palette = colorRampPalette(c('red', 'green'))(length(Starts$Starts)), 
+  domain = Starts$Starts)
+Starts$popup=paste(Starts$name,": ",Starts$Starts)
+leaflet(data = Starts) %>% addTiles() %>%
+  #addMarkers(~Longitude, ~Latitude,icon=DivyIcon,label = ~StationName,popup = ~NoOfStarts) %>%
+  addCircles(~long, ~lat,
+             radius = 100,#radius = ~NoOfStarts/2000,
+             fillOpacity = 0.7,weight = 200,col=~pal(Starts),popup = ~popup,label = ~Starts,
+             stroke = FALSE
+  ) %>% addLabelOnlyMarkers(~long, ~lat, label = ~popup,labelOptions = labelOptions(noHide = T, 
+                                                                                              textOnly = TRUE,
+                                                                                              textsize = "12px",direction = "top"))
+```
+
+The subscribers on an average have shorter trips than the customers. This is expected because subscribers usually commute for work whereas the customers commute to explore the city.
+```{r,message=FALSE, warning=FALSE}
+#Trip duration by user type
+UserTypeDuration = trip %>% group_by(subscription_type) %>% summarise(MinDuration=min(duration),
+                                                                MaxDuration=max(duration),
+                                                                MeanDuration=mean(duration),
+                                                                MedianDuration=median(duration),Count=n())
+ggplot(trip[trip$duration<10000,c("subscription_type","duration")], aes(x=subscription_type, y=duration)) + 
+  geom_boxplot(aes(fill=subscription_type))+ggtitle("Trip Duration by User Type")
+
+```
+
+The total count of trips for subscribers is much more than those by customers as well.
+```{r,message=FALSE, warning=FALSE}
+ggplot(UserTypeDuration, aes(subscription_type, Count))+geom_bar(stat = "identity", aes(fill = Count)) +
+  xlab("Subscriber Type") + ylab("Count") +
+  ggtitle("No of trips by user type") +
+  theme_bw()
+```
+
+The next block of code shows which station stretches, end to end are the most popular ones. The green stretch has the highest number of trips. Do press the "+" in the map to zoom in the three clusters of areas with top stretches.
+```{r,message=FALSE, warning=FALSE}
+#Most popular trips - stretches
+Trips = trip %>% group_by(start_station_id,end_station_id) %>% summarise(Trips=n())
+#remove the trips with same start and stop station
+Trips = Trips[Trips$end_station_id!=Trips$start_station_id,]
+Trips <- data.table(Trips)
+# Following mnel's suggestion, g1, g2 could be used directly in by
+# and it could be even shortened by using `id1` and id2` as their names
+Trips <- Trips[, list(Trips=sum(Trips)), 
+               by=list(id1 = pmin(start_station_id, end_station_id), id2 = pmax(start_station_id, end_station_id))]
+
+Trips = merge(Trips,station[,c("id","long","lat")],by.x="id1",by.y="id")
+colnames(Trips)[colnames(Trips)=="long"]="start_long"
+colnames(Trips)[colnames(Trips)=="lat"]="start_lat"
+Trips = merge(Trips,station[,c("id","long","lat")],by.x="id2",by.y="id")
+colnames(Trips)[colnames(Trips)=="long"]="end_long"
+colnames(Trips)[colnames(Trips)=="lat"]="end_lat"
+Trips=as.data.frame(Trips)
+Trips = Trips %>% top_n(20,Trips)
+PopularStations=unique(c(Trips$id1,Trips$id2))
+PopularMAP=station[station$id %in% PopularStations,]
+
+Trips$floorPop <- floor(rank((Trips$Trips)))
+colours <- seq(1, floor(max(rank((Trips$Trips)))))
+colours <- colorRampPalette(c("darkred","yellow","darkgreen"))(length(colours))
+Trips$colour=NULL
+Trips <- merge(Trips, 
+               data.frame(Pop = 1:length(colours), 
+                          colour = colours), 
+               by.x = "floorPop", 
+               by.y = "Pop")
+m<-leaflet(data = PopularMAP) %>% addTiles() %>% 
+  addLabelOnlyMarkers(~long, ~lat, label = ~name,
+                      labelOptions = labelOptions(noHide = T,
+                                                  #textOnly = TRUE,
+                                                  textsize = "10px",
+                                                  direction = "right"))
+for (i in 1:nrow(Trips)) {
+  m<-m %>% addPolylines(lat=c(Trips[i,]$start_lat,Trips[i,]$end_lat),lng=c(Trips[i,]$start_long,Trips[i,]$end_long),
+                        color = Trips[i,]$colour)}#weight = popular[i,]$Popularity/5000,
+m
+```
+
+Following are some of the busiest bikes of all by total duration after removing the outliers:
+```{r,message=FALSE, warning=FALSE}
+#Busiest Bike
+Bikes = trip %>% filter(duration < 12*60*60) %>%
+  group_by(bike_id) %>% summarise(Count=n(),TotalDuration=sum(duration)/60,AvgDuration=mean(duration)/60) 
+Bikes %>% top_n(5,TotalDuration) %>% arrange(desc(TotalDuration))
+
+```
+
+Overall weekdays are more popular than weekends:
+```{r,message=FALSE, warning=FALSE}
+#hour and date for starts
+trip$start_hour = as.numeric(format(strptime(trip$start_date,"%m/%d/%Y %H:%M"),'%H'))
+trip$start_date = as.Date(trip$start_date,format = "%m/%d/%Y %H:%M")
+#peak hours,days, months
+trip$day=weekdays(trip$start_date)
+PeakHours = trip %>% group_by(start_hour,subscription_type) %>% summarise(count=n())
+PeakDays = trip %>% group_by(day,subscription_type) %>% summarise(count=n())
+p <-ggplot(PeakDays, aes(day, count))
+p +geom_bar(stat = "identity", aes(fill = subscription_type)) +
+  xlab("Weekday") + ylab("Count") +
+  ggtitle("Most Popular Days") +
+  theme_bw()
+```
+
+The most popular hours also tie up with the work-start (8-9am) and end-time (5-6pm) for subscribers:
+```{r,message=FALSE, warning=FALSE}
+p <-ggplot(PeakHours, aes(start_hour, count))
+p +geom_bar(stat = "identity", aes(fill = subscription_type)) +
+  xlab("Hour of the day") + ylab("Count") +
+  ggtitle("Most Popular Hours") +
+  theme_bw()
+```
+
+The winter months are less busy than the other months:
+```{r,message=FALSE, warning=FALSE}
+trip$month=months.Date(trip$start_date,abbreviate = TRUE)
+PeakMonth=trip %>% group_by(month,subscription_type) %>% summarise(count=n())
+p <-ggplot(PeakMonth, aes(month, count))
+p +geom_bar(stat = "identity", aes(fill = subscription_type)) +
+  xlab("Hour of the day") + ylab("Count") +
+  ggtitle("Most Popular Hours") +
+  theme_bw()
+```
+
+In the follwoing piece, we will predict the number of trips from each station on a given day so that the operator can plan number of bikes on the dock. We will use features such as month, day of the week, weather features, previous 1-7 day trips etc to make these predictions. 
+
+Tried to include the weather features at zip code level, but the weather data isn't as granular as the stations data - aggregated it at the date level. 
+
+Also tried to make predictions at the hourly level, but it would have been impossible for the operator to plan number of bikes at a given station by hour. So, making the predictions a day in advance would help them prepare the station with the optimal number of bikes. 
+
+```{r,message=FALSE, warning=FALSE}
+Data = trip %>% group_by(start_date,start_station_id,subscription_type) %>% summarise(Trips=n())
+Data$DayMinus1=Data$start_date-1
+Data$DayMinus2=Data$start_date-2
+Data$DayMinus3=Data$start_date-3
+Data$DayMinus4=Data$start_date-4
+Data$DayMinus5=Data$start_date-5
+Data$DayMinus6=Data$start_date-6
+Data$DayMinus7=Data$start_date-7
+Data=merge(Data,rename(Data[,c("start_date","start_station_id","Trips","subscription_type")],DayMinusTrips1=Trips),by.x = c("DayMinus1","start_station_id","subscription_type"),
+           by.y=c("start_date","start_station_id","subscription_type"),all.x = T)
+Data=merge(Data,rename(Data[,c("start_date","start_station_id","Trips","subscription_type")],DayMinusTrips2=Trips),by.x = c("DayMinus2","start_station_id","subscription_type"),
+           by.y=c("start_date","start_station_id","subscription_type"),all.x = T)
+Data=merge(Data,rename(Data[,c("start_date","start_station_id","Trips","subscription_type")],DayMinusTrips3=Trips),by.x = c("DayMinus3","start_station_id","subscription_type"),
+           by.y=c("start_date","start_station_id","subscription_type"),all.x = T)
+Data=merge(Data,rename(Data[,c("start_date","start_station_id","Trips","subscription_type")],DayMinusTrips4=Trips),by.x = c("DayMinus4","start_station_id","subscription_type"),
+           by.y=c("start_date","start_station_id","subscription_type"),all.x = T)
+Data=merge(Data,rename(Data[,c("start_date","start_station_id","Trips","subscription_type")],DayMinusTrips5=Trips),by.x = c("DayMinus5","start_station_id","subscription_type"),
+           by.y=c("start_date","start_station_id","subscription_type"),all.x = T)
+Data=merge(Data,rename(Data[,c("start_date","start_station_id","Trips","subscription_type")],DayMinusTrips6=Trips),by.x = c("DayMinus6","start_station_id","subscription_type"),
+           by.y=c("start_date","start_station_id","subscription_type"),all.x = T)
+Data=merge(Data,rename(Data[,c("start_date","start_station_id","Trips","subscription_type")],DayMinusTrips7=Trips),by.x = c("DayMinus7","start_station_id","subscription_type"),
+           by.y=c("start_date","start_station_id","subscription_type"),all.x = T)
+Data[is.na(Data)]=0
+Data$Day=weekdays(Data$start_date)
+Data$Month=months(Data$start_date)
+```
+
+Following was the work done on extracting zip codes from the lat and long of stations, but was eventually not used because of the weather data granularity
+```{r,message=FALSE, warning=FALSE}
+# library(RCurl)
+# library(RJSONIO)
+# library(zoo)
+# 
+# latlon2zip <- function(lat, lon) {
+#   url <- sprintf("http://nominatim.openstreetmap.org/reverse?format=json&lat=%f&lon=%f&zoom=18&addressdetails=1", lat, lon)
+#   res <- fromJSON(url)
+#   return(res[["address"]][["postcode"]])
+# }
+# 
+# station$Zip="NA"
+# for ( i in 1:nrow(station)){
+#   tryCatch({
+# zip <- latlon2zip(lat=station$lat[i], lon=station$long[i])
+# print(zip)
+# station$Zip[i]=zip
+#   }, error=function(e){})
+# }
+# 
+# station$Zip[station$Zip=="NA"] <- NA
+# station=station %>% arrange(lat,long)
+# station$Zip <- na.locf(station$Zip)
+# station$Zip=gsub("-*","",station$Zip)
+# station$Zip=substr(station$Zip,1,5)
+
+#Data=merge(Data,station[,c("id","Zip")],by.x="start_station_id",by.y="id")
+```
+
+```{r,message=FALSE, warning=FALSE}
+weather$date=as.Date(weather$date,format="%m/%d/%Y")
+
+Mode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+weather$precipitation_inches=as.numeric(weather$precipitation_inches)
+weatherAggregate = weather %>% group_by(date) %>% summarise(max_temp=max(max_temperature_f,na.rm = T),
+                                                            mean_temp=mean(mean_temperature_f,na.rm = T),
+                                                            min_temp=min(min_temperature_f,na.rm = T),
+                                                            max_dew=max(max_dew_point_f,na.rm = T),
+                                                            mean_dew=mean(mean_dew_point_f,na.rm = T),
+                                                            min_dew=min(min_dew_point_f,na.rm = T),
+                                                            max_humidity=max(max_humidity,na.rm=T),
+                                                            min_humidity=min(min_humidity,na.rm = T),
+                                                            mean_humidity=mean(mean_humidity,na.rm = T),
+                                                            min_visibility=min(min_visibility_miles,na.rm=T),
+                                                            max_visibility=max(max_visibility_miles,na.rm=T),
+                                                            mean_visibility=mean(mean_visibility_miles,na.rm=T),
+                                                            events=Mode(events),
+                                                            precipitation_inches=median(precipitation_inches,na.rm = T),
+                                                            cloud_cover=median(cloud_cover,na.rm=T),
+                                                            max_wind_speed=max(max_wind_Speed_mph,na.rm=T),
+                                                            mean_wind_speed=mean(mean_wind_speed_mph,na.rm = T))
+                                                            
+```
+
+
+```{r,message=FALSE, warning=FALSE}
+Data=merge(Data,weatherAggregate,by.x="start_date",by.y = "date")                                                   
+```
+```{r}
+Data$events[is.na(Data$events)]="NA"
+
+character_vars <- lapply(Data, class) == "character"
+Data[, character_vars] <- lapply(Data[, character_vars], as.factor)
+colnames(Data) <- make.names(colnames(Data), unique=TRUE)
+Data=Data[complete.cases(Data),]
+Data$start_date=Data$DayMinus6=Data$DayMinus1=Data$DayMinus5=Data$DayMinus4=Data$DayMinus3=Data$DayMinus2=Data$DayMinus7=NULL
+
+#Data=Data %>% group_by(start_station_id,subscription_type) %>% mutate(AvgStarts=mean(Trips))
+
+```
+
+```{r,message=FALSE, warning=FALSE}
+trainIndex <- createDataPartition(Data$Trips, p = 0.8, list=FALSE, times=1)
+subTrain <- Data[trainIndex,]
+subTest <- Data[-trainIndex,]
+formula <- Trips~.
+```
+
+Let's fit a simple linear regression model with 5 fold cross validation. The R2 is 86%
+```{r,message=FALSE, warning=FALSE}
+tcontrol2 <- trainControl(method = "cv", number = 5)
+fit2      <- train(formula, data=subTrain, method = "lm", metric = "RMSE", trControl = tcontrol2)
+fit2$results
+```
+
+Let's try to fit random forest model while tuning hyperparameters with 5 fold cross validation - R2 of 92%
+```{r,message=FALSE, warning=FALSE}
+# tgrid <- expand.grid(
+#     .mtry = 4:6,
+#     .splitrule = "variance",
+#     .min.node.size = c(5,10,15)
+# )
+#choosing the winning set of hyper parameters to speed up the code
+ tgrid <- expand.grid(
+     .mtry = 6,
+     .splitrule = "variance",
+     .min.node.size = c(5)
+)
+fit.rf.cv <- train(formula, data=subTrain , method='ranger', trControl=trainControl(method="cv", number = 5, verboseIter = T,allowParallel= FALSE),metric='RMSE',importance = 'impurity',num.trees=100,tuneGrid=tgrid)
+fit.rf.cv$results
+```
+
+Build the ranger/Random Forest model on the complete data set to find the important features
+```{r,message=FALSE, warning=FALSE}
+#Variable Importance Plot
+ggplot(varImp(fit.rf.cv),show.legend=FALSE) +
+  geom_bar(stat='identity')+
+  coord_flip() + xlab("Features") +ylab("Ranked by Importance") +
+  theme(text = element_text(size=10),legend.position="none")
+```
+
+With this model, given the previous days trips, day of the week, weather etc, we can predict the total number of trips by subscriber type for each station id. This daily model can be used by the operator to optimize the daily bike placement.
